@@ -5,8 +5,10 @@ A clasic file system basing its storage on Telegram documents
 ## Usage
 
 `$ pip install -r requirements.txt`
+
 `$ python grameler.py <DIRECTORY/TO/MOUNT> <TELEGRAM_BOT_TOKEN> <USER_ID>`
-USER_ID is the same as the chat_id for your own chat with the bot. Grameler in fact needs the chat_id.
+
+`USER_ID` is the same as the chat_id for your own chat with the bot. Grameler in fact needs the chat_id.
 
 
 ## TODO
