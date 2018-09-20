@@ -14,6 +14,6 @@ A clasic file system basing its storage on Telegram documents
 ## TODO
 
 - [ ] Fix write operation
-- [ ] Check if support for big files (>20MB) if working
+- [ ] Check if support for big files (>20MB) is working
 - [ ] Maybe cache (?)
 - [ ] Upload database to telegram and store locally only the file_id
