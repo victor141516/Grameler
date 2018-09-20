@@ -358,9 +358,8 @@ class Grameler(Operations):
     #     return self.flush(path, fh)
 
 
-def main(mountpoint, tg_token, chat_id, index_file):
-    FUSE(Grameler(tg_token, chat_id, index_file), mountpoint, nothreads=True, foreground=True)
+def main(mountpoint, tg_token, chat_id):
+    FUSE(Grameler(tg_token, chat_id), mountpoint, nothreads=True, foreground=True)
 
 if __name__ == '__main__':
-    import ipdb; ipdb.set_trace()
     main(sys.argv[1], sys.argv[2], sys.argv[3])
