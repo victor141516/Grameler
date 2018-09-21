@@ -6,14 +6,18 @@ from functools import wraps
 from io import BytesIO
 import logging
 import os
+from peewee import fn
 import requests
 import sys
+from threading import Thread
+import time
 
 from database import db, File, TelegramDocument
 import file_utils
 from fuse import FUSE, FuseOSError, Operations
 import telebot
 import tempfile
+
 
 log = logging.getLogger(__name__)
 
@@ -22,7 +26,7 @@ def logged(f):
     def wrapped(*args, **kwargs):
         try:
             ret = f(*args, **kwargs)
-            log.info('-------------------------------------\n%s(%s) = %s', f.__name__, ','.join([str(item) for item in args[1:]]), str(ret))
+            log.error('-------------------------------------\n%s(%s) = %s', f.__name__, ','.join([str(item) for item in args[1:]]), str(ret))
             return ret
         except Exception as e:
             log.error('-------------------------------------\n%s(%s)', f.__name__, ','.join([str(item) for item in args[1:]]))
@@ -51,11 +55,14 @@ class Grameler(Operations):
         self.tgbot = telebot.TeleBot(tg_token)
         self.chat_id = chat_id
         self._tgchunk_size = 20*1024*1024
+        self.tempfiles = {}
+        Thread(target=self.upload_files_daemon).start()
+
 
     # Helpers
     # =======
 
-    @logged
+    # @logged
     def _full_path(self, partial):
         if partial.startswith("/"):
             partial = partial[1:]
@@ -63,17 +70,21 @@ class Grameler(Operations):
         return path
 
 
-    @logged
+    # @logged
     def _upload_file(self, doc):
         doc.seek(0)
         return self.tgbot.send_document(self.chat_id, doc).document.file_id
 
-    @logged
-    def _get_file(self, file_id):
+    # @logged
+    def _get_file(self, file_id, return_raw=True):
         file_info = self.tgbot.get_file(file_id)
-        return requests.get('https://api.telegram.org/file/bot{0}/{1}'.format(self.tg_token, file_info.file_path), stream=True).raw
+        res = requests.get('https://api.telegram.org/file/bot{0}/{1}'.format(self.tg_token, file_info.file_path), stream=True)
+        if return_raw:
+            return res.raw
+        else:
+            return res
 
-    @logged
+    # @logged
     def _get_path_ids(self, path):
         names = list(filter(None, path.split('/')))
         parent_id = 1
@@ -90,16 +101,16 @@ class Grameler(Operations):
     # Filesystem methodsc
     # ==================
 
-    @logged
+    # @logged
     def access(self, path, mode):
         self._get_path_ids(path)
 
-    @logged
+    # @logged
     def chmod(self, path, mode):
         file_id = self._get_path_ids(path)[-1]
         File.update(mode=mode).where(File.id == file_id).execute()
 
-    @logged
+    # @logged
     def chown(self, path, uid, gid):
         file_id = self._get_path_ids(path)[-1]
         File.update(
@@ -121,7 +132,7 @@ class Grameler(Operations):
             'st_size': f.size
         }
 
-    @logged
+    # @logged
     def readdir(self, path, fh):
         file_id = self._get_path_ids(path)[-1]
         f = File.get(id=file_id)
@@ -133,7 +144,7 @@ class Grameler(Operations):
         for r in dirents:
             yield r
 
-    @logged
+    # @logged
     def readlink(self, path):
         file_id = self._get_path_ids(path)[-1]
         f = File.get(id=file_id)
@@ -142,11 +153,11 @@ class Grameler(Operations):
         else:
             return f.sym_link
 
-    @logged
+    # @logged
     def mknod(self, path, mode, dev):
         return None
 
-    @logged
+    # @logged
     def rmdir(self, path):
         file_id = self._get_path_ids(path)[-1]
         f = File.get(id=file_id)
@@ -157,7 +168,7 @@ class Grameler(Operations):
         else:
             f.delete().where(File.id == file_id).execute()
 
-    @logged
+    # @logged
     def mkdir(self, path, mode):
         dirs = path.split('/')
         subpath = '/'.join(dirs[:-1])
@@ -178,27 +189,27 @@ class Grameler(Operations):
     @logged
     def statfs(self, path):
         return {
-            # 'f_bavail': -1,  # Free blocks available to unprivileged user
-            # 'f_blocks': -1,  # Total data blocks in filesystem
-            'f_bsize': 8192,  # Optimal transfer block size
+            'f_bavail': 2024,  # Free blocks available to unprivileged user
+            'f_blocks': 2024,  # Total data blocks in filesystem
+            'f_bsize': 512,  # Optimal transfer block size
             # 'f_ffree': -1,  # Free file nodes in filesystem
             # 'f_files': -1,  # Total file nodes in filesystem
-            # 'f_frsize': 1024,  # Fragment size (since Linux 2.6)
-            # 'f_bfree': -1,  # Free blocks in filesystem
+            # 'f_frsize': self._tgchunk_size,  # Fragment size (since Linux 2.6)
+            'f_bfree': 2024,  # Free blocks in filesystem
             'f_namemax': 255  # Maximum length of filenames
          }
 
-    @logged
+    # @logged
     def unlink(self, path):
         file_id = self._get_path_ids(path)[-1]
         File.delete().where(File.id == file_id).execute()
 
-    @logged
+    # @logged
     def symlink(self, src, dst):
         file_id = self._get_path_ids(src)[-1]
         File.update(sym_link=dst).where(File.id == file_id).execute()
 
-    @logged
+    # @logged
     def rename(self, old, new):  # Also mv
         dir_ids_org = self._get_path_ids(old)
 
@@ -216,7 +227,7 @@ class Grameler(Operations):
     # def link(self, target, name):
     #     return os.link(self._full_path(target), self._full_path(name))
 
-    @logged
+    # @logged
     def utimens(self, path, times=None):
         if times is not None:
             access_time, modified_time = times
@@ -229,11 +240,11 @@ class Grameler(Operations):
     # File methods
     # ============
 
-    @logged
+    # @logged
     def open(self, path, flags):
         return self._get_path_ids(path)[-1]
 
-    @logged
+    # @logged
     def create(self, path, mode, fi=None):
         dirs = path.split('/')
         subpath = '/'.join(dirs[:-1])
@@ -247,7 +258,7 @@ class Grameler(Operations):
             is_directory=False,
         ).save()
 
-    @logged
+    # @logged
     def read(self, path, length, offset, fh):
         file_id = self._get_path_ids(path)[-1]
         f = File.get(id=file_id)
@@ -271,58 +282,102 @@ class Grameler(Operations):
         f.save()
         return temp.read(length)
 
-    @logged
+    def upload_files_daemon(self):
+        while True:
+            temp_copy = self.tempfiles.copy()
+            for path in temp_copy:
+                if (datetime.datetime.now() - temp_copy[path]['lastwrite']).seconds > 10:
+                    print('Uploading file: ' + path)
+                    if path in self.tempfiles:
+                        del(self.tempfiles[path])
+                        self._upload_file(temp_copy[path]['file'])
+            time.sleep(5)
+
+    # @logged
     def write(self, path, buf, offset, fh):
+        print('Write:')
+        print('  offset: ' + str(offset))
+        print('  bytes: ' + str(len(buf)))
+        if path not in self.tempfiles:
+            self.tempfiles[path] = {'file': tempfile.SpooledTemporaryFile(max_size=50*(1024**2))}
+        self.tempfiles[path]['lastwrite'] = datetime.datetime.now()
+        self.tempfiles[path]['file'].seek(offset)
+        print(self.tempfiles[path]['file'].write(buf))
+        return
+
+
+        print('Write:')
+        print('  offset: ' + str(offset))
+        print('  bytes: ' + str(len(buf)))
         file_id = self._get_path_ids(path)[-1]
         f = File.get(id=file_id)
-        file_no = 1 + int(( f.size - offset ) / self._tgchunk_size )
-        nof_files = len(buf) / self._tgchunk_size
 
-        telegram_documents = TelegramDocument.select()\
-                                .where(
-                                    TelegramDocument.file_id == f.id,
-                                    TelegramDocument.file_no.between(file_no, file_no + nof_files)
-                                )
-        print('Get documents for file', f.id, 'and NOs between', file_no, 'and', file_no + nof_files)
-        telegram_documents = [{
-                'db': t,
-                'out': tempfile.SpooledTemporaryFile(max_size=1024**3)
-            } for t in telegram_documents]
+        nof_chunks = int(len(buf) / self._tgchunk_size) + (1 if len(buf) != self._tgchunk_size else 0)
+        first_chunk_start_position = offset - (offset % self._tgchunk_size)
+        first_chunk_no = int(first_chunk_start_position / self._tgchunk_size)
 
-        if len(telegram_documents) > 0:
-            first_file = self._get_file(telegram_documents[0]['db'].telegram_id)
-            first_offset = ( f.size - offset ) % self._tgchunk_size
-            for data in first_file:
-                telegram_documents[0]['out'].write(data)
-        else:
-            telegram_documents = [{
-                'db': TelegramDocument.create(telegram_id=None, file_id=f.id, file_no=0),
-                'out': tempfile.SpooledTemporaryFile(max_size=1024**3)
-            }]
-            first_offset = offset
-        telegram_documents[0]['out'].seek(first_offset)
-        data_cursor = min(self._tgchunk_size - first_offset, len(buf))
-        telegram_documents[0]['out'].write(buf[0:data_cursor])
+        chunks_streams = []
+        for x in range(first_chunk_no, first_chunk_no + nof_chunks):
+            tgd, created = TelegramDocument.get_or_create(
+                file_id=f.id,
+                file_no=x
+            )
+            if created:
+                chunks_streams.append(None)
+            else:
+                chunks_streams.append(self._get_file(tgd.telegram_id))
 
-        for i in range(0, len(telegram_documents)):
-            inc = min(data_cursor + self._tgchunk_size, len(buf))
-            telegram_documents[i]['out'].write(buf[data_cursor:data_cursor+inc])
-            data_cursor = data_cursor + inc
+        for x in range(first_chunk_no, first_chunk_no + nof_chunks):
+            chunk_stream = chunks_streams.pop(0)
+            chunk_buf = tempfile.SpooledTemporaryFile(max_size=1024**3)
+            chunk_buf.seek(0)
+            if chunk_stream is not None:
+                chunk_buf.write(chunk_stream.read())
 
-        for i in range(0, len(telegram_documents)):
-            new_telegram_id = self._upload_file(telegram_documents[i]['out'])
-            telegram_documents[i]['db'].telegram_id = new_telegram_id
-            telegram_documents[i]['db'].save()
+            if x is 0:
+                start_chunk = offset % self._tgchunk_size
+                last_chunk = self._tgchunk_size
+                start_buf = start_chunk + (first_chunk_no * self._tgchunk_size)
+                last_buf = (first_chunk_no + 1) * self._tgchunk_size
+            elif x is (first_chunk_no + nof_chunks - 1):
+                start_chunk = 0
+                last_chunk = self._tgchunk_size
+                start_buf =  x * self._tgchunk_size
+                last_buf = ((x + 1) * self._tgchunk_size) - 1
+            else:
+                start_chunk = 0
+                last_chunk = (offset + len(buf)) % self._tgchunk_size
+                start_buf = x * self._tgchunk_size
+                last_buf = start_buf + last_chunk
 
+            chunk_buf.seek(start_chunk)
+            print('  bytes to write (' + str(start_buf) + ':' + str(last_buf) + '): ' + str(len(buf[start_buf:last_buf])))
+            bytes_written = chunk_buf.write(buf[start_buf:last_buf])
+            print('  bytes written: ' + str(bytes_written))
+            # chunk_buf[start_chunk:last_chunk] = buf[start_buf:last_buf]
+            tg_doc_id = self._upload_file(chunk_buf)
+            tgd.telegram_id = tg_doc_id
+            tgd.save()
+
+
+        last_tgd = TelegramDocument.select(
+            fn.MAX(TelegramDocument.file_no),
+            TelegramDocument.id,
+            TelegramDocument.telegram_id,
+            TelegramDocument.file_no
+        ).where(TelegramDocument.file_id == f.id).first()
+        file_size = last_tgd.file_no * self._tgchunk_size
+        file_size += int(self._get_file(last_tgd.telegram_id).headers['Content-length'])
+        print('Last file size: ' + self._get_file(last_tgd.telegram_id).headers['Content-length'])
 
         f.updated_at = datetime.datetime.now()
-        f.size = len(buf)
+        f.size = file_size
         f.save()
-        return len(buf)
+        print('\n')
+        return f.size
 
-    @logged
+    # @logged
     def truncate(self, path, length, fh=None):
-        return
         file_id = self._get_path_ids(path)[-1]
         f = File.get(id=file_id)
         telegram_files = [t for t in f.telegram_files]
