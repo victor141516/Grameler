@@ -18,7 +18,7 @@ from fuse import FUSE, FuseOSError, Operations
 import telebot
 import tempfile
 
-
+logging.basicConfig()
 log = logging.getLogger(__name__)
 
 def logged(f):
